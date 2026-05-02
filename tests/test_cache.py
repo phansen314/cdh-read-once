@@ -48,3 +48,36 @@ def test_clear():
     c.clear()
     assert len(c) == 0
     assert c.check_and_update("s1", "/a", 1) == "miss"
+
+
+def test_paginated_same_range_is_hit():
+    c = ReadOnceCache(maxsize=10, ttl_s=60)
+    assert c.check_and_update("s", "/a", 1, 0, 50) == "miss"
+    assert c.check_and_update("s", "/a", 1, 0, 50) == "hit"
+
+
+def test_paginated_different_range_is_miss():
+    c = ReadOnceCache(maxsize=10, ttl_s=60)
+    c.check_and_update("s", "/a", 1, 0, 50)
+    assert c.check_and_update("s", "/a", 1, 50, 50) == "miss"
+
+
+def test_paginated_mtime_change_is_miss():
+    c = ReadOnceCache(maxsize=10, ttl_s=60)
+    c.check_and_update("s", "/a", 1, 0, 50)
+    assert c.check_and_update("s", "/a", 2, 0, 50) == "miss"
+
+
+def test_paginated_and_full_are_independent():
+    c = ReadOnceCache(maxsize=10, ttl_s=60)
+    assert c.check_and_update("s", "/a", 1, 0, 50) == "miss"
+    assert c.check_and_update("s", "/a", 1) == "miss"
+
+
+def test_lru_eviction_at_maxsize():
+    c = ReadOnceCache(maxsize=2, ttl_s=60)
+    c.check_and_update("s", "/a", 1)
+    c.check_and_update("s", "/b", 1)
+    c.check_and_update("s", "/c", 1)
+    assert len(c) == 2
+    assert c.check_and_update("s", "/a", 1) == "miss"

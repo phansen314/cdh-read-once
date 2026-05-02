@@ -19,10 +19,10 @@ Logs to stderr.
 
 | Var | Default | Effect |
 |---|---|---|
-| `CDH_BIND_ADDR` | (required) | `host:port` to bind |
+| `CDH_BIND_ADDR` | (required) | `host:port` to bind. IPv6 uses bracketed form, e.g. `[::1]:9001`. Non-loopback hosts log a warning at startup (handler has no auth). |
 | `READ_ONCE_MODE` | `warn` | `warn` → `allow` envelope with rationale; `deny` → `deny` envelope |
 | `READ_ONCE_TTL` | `1200` | seconds before a cache entry expires |
-| `READ_ONCE_DISABLED` | unset | set to `1` to no-op (always abstain) |
+| `READ_ONCE_DISABLED` | unset | set to `1`, `true`, `yes`, or `on` (case-insensitive) to no-op (always abstain) |
 | `READ_ONCE_CACHE_MAXSIZE` | `10000` | max `(session_id, file_path)` entries |
 | `READ_ONCE_MAX_CONCURRENCY` | `16` | bounded server thread pool |
 | `READ_ONCE_MAX_REQUEST_BYTES` | `1048576` | reject oversized requests with 413 |
@@ -57,6 +57,20 @@ ExecStart=%h/code/cdh-read-once/.venv/bin/cdh-read-once
 Restart=on-failure
 RestartSec=2
 
+# Hardening — handler only needs read-only stat() on user files.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+MemoryMax=128M
+TasksMax=64
+
 [Install]
 WantedBy=default.target
 ```
@@ -77,6 +91,7 @@ uv run pytest
 
 Implements [CDHP 1.0](../claude-dynamic-hooks/docs/CDHP.md):
 
-- `GET /health` → `{name, protocol_version, events, uptime_s}`
+- `GET /health` → `{name, version, protocol_version, events, uptime_s, cache_size}`
 - `POST /hooks/preToolUse` request `{"payload": "<json-string>"}` → `{"envelope": "<json-string>" | null}`
+- `POST /admin/clear` → `{"cleared": true}`. Wipes the cache (escape hatch for `deny` mode).
 - Other paths → 404. Bad request body → 400. Oversized → 413.

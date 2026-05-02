@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import signal
+import socket
 import sys
 import threading
 import time
@@ -9,6 +11,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from . import __version__
 from .cache import ReadOnceCache
 from .config import Settings, load_from_env
 from .handler import decide_read_once
@@ -18,6 +21,7 @@ _PROTOCOL_VERSION = "1.0"
 _EVENTS = ["preToolUse"]
 
 _SEMAPHORE_ACQUIRE_TIMEOUT_S = 5.0
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 def _make_request_handler(
@@ -30,6 +34,7 @@ def _make_request_handler(
     class Handler(BaseHTTPRequestHandler):
         server_version = f"cdh-read-once/{_PROTOCOL_VERSION}"
         sys_version = ""
+        timeout = 5
 
         def do_GET(self) -> None:
             if not self._acquire():
@@ -38,9 +43,11 @@ def _make_request_handler(
                 if self.path == "/health":
                     self._send_json(HTTPStatus.OK, {
                         "name": _NAME,
+                        "version": __version__,
                         "protocol_version": _PROTOCOL_VERSION,
                         "events": _EVENTS,
                         "uptime_s": int(time.monotonic() - started_monotonic),
+                        "cache_size": len(cache),
                     })
                 else:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
@@ -51,21 +58,21 @@ def _make_request_handler(
             if not self._acquire():
                 return
             try:
-                if self.path != "/hooks/preToolUse":
+                if self.path == "/hooks/preToolUse":
+                    self._handle_pre_tool_use()
+                elif self.path == "/admin/clear":
+                    cache.clear()
+                    self._send_json(HTTPStatus.OK, {"cleared": True})
+                else:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
-                    return
-                self._handle_pre_tool_use()
             finally:
                 semaphore.release()
 
         def _acquire(self) -> bool:
             if semaphore.acquire(timeout=_SEMAPHORE_ACQUIRE_TIMEOUT_S):
                 return True
-            self._send_json(
-                HTTPStatus.SERVICE_UNAVAILABLE,
-                {"error": "handler busy"},
-                _release=False,
-            )
+            self._send_json(HTTPStatus.SERVICE_UNAVAILABLE,
+                            {"error": "handler busy"})
             return False
 
         def _handle_pre_tool_use(self) -> None:
@@ -121,7 +128,7 @@ def _make_request_handler(
             envelope_str = json.dumps(envelope_obj) if envelope_obj is not None else None
             self._send_json(HTTPStatus.OK, {"envelope": envelope_str})
 
-        def _send_json(self, status: HTTPStatus, obj: Any, *, _release: bool = True) -> None:
+        def _send_json(self, status: HTTPStatus, obj: Any) -> None:
             body = json.dumps(obj).encode("utf-8")
             self.send_response(int(status))
             self.send_header("Content-Type", "application/json")
@@ -138,22 +145,28 @@ def _make_request_handler(
 
 
 def build_server(settings: Settings) -> tuple[ThreadingHTTPServer, ReadOnceCache]:
-    host, _, port_s = settings.bind_addr.rpartition(":")
-    if not host or not port_s:
-        raise ValueError(f"CDH_BIND_ADDR must be host:port, got {settings.bind_addr!r}")
-    port = int(port_s)
-
     cache = ReadOnceCache(maxsize=settings.cache_maxsize, ttl_s=settings.ttl_s)
     semaphore = threading.BoundedSemaphore(settings.max_concurrency)
     started = time.monotonic()
     handler_cls = _make_request_handler(settings, cache, semaphore, started)
 
-    server = ThreadingHTTPServer((host, port), handler_cls)
+    server_cls = ThreadingHTTPServer
+    if ":" in settings.host:
+        class _IPv6Server(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+        server_cls = _IPv6Server
+
+    server = server_cls((settings.host, settings.port), handler_cls)
     server.daemon_threads = True
     return server, cache
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     try:
         settings = load_from_env()
     except ValueError as e:
@@ -161,6 +174,12 @@ def main() -> None:
         sys.exit(2)
 
     server, _cache = build_server(settings)
+
+    if settings.host not in _LOOPBACK_HOSTS:
+        logging.getLogger("cdh_read_once").warning(
+            "binding to non-loopback %s — handler has no auth, "
+            "file paths will be readable by anyone on network", settings.host,
+        )
 
     def _shutdown(*_a: Any) -> None:
         threading.Thread(target=server.shutdown, daemon=True).start()

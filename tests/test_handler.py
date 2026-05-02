@@ -12,6 +12,8 @@ from cdh_read_once.handler import decide_read_once
 def _settings(*, mode: str = "warn", disabled: bool = False, ttl_s: int = 1200) -> Settings:
     return Settings(
         bind_addr="127.0.0.1:9001",
+        host="127.0.0.1",
+        port=9001,
         ttl_s=ttl_s,
         mode=mode,  # type: ignore[arg-type]
         disabled=disabled,
@@ -46,15 +48,35 @@ def test_non_read_tool_returns_none():
     assert decide_read_once(payload, _settings(), cache, _stat_factory()) is None
 
 
-def test_offset_skipped():
+def test_offset_repeat_is_dedupe():
     cache = ReadOnceCache(maxsize=10, ttl_s=60)
-    payload = _read_payload(offset=10)
-    assert decide_read_once(payload, _settings(), cache, _stat_factory()) is None
+    s = _settings()
+    stat = _stat_factory()
+    assert decide_read_once(_read_payload(offset=10, limit=20), s, cache, stat) is None
+    out = decide_read_once(_read_payload(offset=10, limit=20), s, cache, stat)
+    assert out is not None
+    assert "offset=10" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def test_limit_skipped():
+def test_offset_different_range_not_dedupe():
     cache = ReadOnceCache(maxsize=10, ttl_s=60)
-    payload = _read_payload(limit=5)
+    s = _settings()
+    stat = _stat_factory()
+    assert decide_read_once(_read_payload(offset=10, limit=20), s, cache, stat) is None
+    assert decide_read_once(_read_payload(offset=30, limit=20), s, cache, stat) is None
+
+
+def test_full_then_paginated_independent():
+    cache = ReadOnceCache(maxsize=10, ttl_s=60)
+    s = _settings()
+    stat = _stat_factory()
+    assert decide_read_once(_read_payload(), s, cache, stat) is None
+    assert decide_read_once(_read_payload(offset=0, limit=50), s, cache, stat) is None
+
+
+def test_non_int_offset_returns_none():
+    cache = ReadOnceCache(maxsize=10, ttl_s=60)
+    payload = _read_payload(offset="ten")
     assert decide_read_once(payload, _settings(), cache, _stat_factory()) is None
 
 

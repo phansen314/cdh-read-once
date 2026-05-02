@@ -7,21 +7,27 @@ from cachetools import TTLCache
 
 CacheResult = Literal["hit", "miss"]
 
+CacheKey = tuple[str, str, int, int | None, int | None]
+
 
 class ReadOnceCache:
     def __init__(self, *, maxsize: int, ttl_s: int) -> None:
-        self._cache: TTLCache = TTLCache(maxsize=maxsize, ttl=ttl_s)
-        self._lock = threading.RLock()
+        self._cache: TTLCache[CacheKey, bool] = TTLCache(maxsize=maxsize, ttl=ttl_s)
+        self._lock = threading.Lock()
 
     def check_and_update(
-        self, session_id: str, file_path: str, mtime_ns: int,
+        self,
+        session_id: str,
+        file_path: str,
+        mtime_ns: int,
+        offset: int | None = None,
+        limit: int | None = None,
     ) -> CacheResult:
-        key = (session_id, file_path)
+        key: CacheKey = (session_id, file_path, mtime_ns, offset, limit)
         with self._lock:
-            cached = self._cache.get(key)
-            if cached == mtime_ns:
+            if key in self._cache:
                 return "hit"
-            self._cache[key] = mtime_ns
+            self._cache[key] = True
             return "miss"
 
     def clear(self) -> None:

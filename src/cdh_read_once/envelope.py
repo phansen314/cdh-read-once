@@ -5,7 +5,7 @@ from typing import Literal
 Decision = Literal["allow", "deny", "ask"]
 
 
-def build_pre_tool_use_envelope(decision: Decision, reason: str) -> dict:
+def build_pre_tool_use_envelope(decision: Decision, reason: str) -> dict[str, object]:
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

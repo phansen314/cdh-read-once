@@ -15,12 +15,37 @@ _DEFAULT_MAX_REQUEST_BYTES = 1_048_576  # 1 MiB; matches CDHP wire_max_bytes def
 @dataclass(frozen=True, slots=True)
 class Settings:
     bind_addr: str
+    host: str
+    port: int
     ttl_s: int
     mode: Mode
     disabled: bool
     cache_maxsize: int
     max_concurrency: int
     max_request_bytes: int
+
+
+def _parse_bind(bind: str) -> tuple[str, int]:
+    host, sep, port_s = bind.rpartition(":")
+    if not sep or not host or not port_s:
+        raise ValueError(f"CDH_BIND_ADDR must be host:port, got {bind!r}")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    try:
+        port = int(port_s)
+    except ValueError as e:
+        raise ValueError(f"CDH_BIND_ADDR port must be integer, got {port_s!r}") from e
+    if not (0 <= port <= 65535):
+        raise ValueError(f"CDH_BIND_ADDR port out of range: {port}")
+    return host, port
+
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _bool_env(name: str) -> bool:
+    raw = os.environ.get(name)
+    return raw is not None and raw.strip().lower() in _TRUTHY
 
 
 def _int_env(name: str, default: int, *, min_value: int, max_value: int) -> int:
@@ -40,18 +65,20 @@ def load_from_env() -> Settings:
     bind = os.environ.get("CDH_BIND_ADDR")
     if not bind:
         raise ValueError("CDH_BIND_ADDR is required (host:port)")
-    if ":" not in bind:
-        raise ValueError(f"CDH_BIND_ADDR must be host:port, got {bind!r}")
+    host, port = _parse_bind(bind)
 
     mode_raw = os.environ.get("READ_ONCE_MODE") or "warn"
     if mode_raw not in ("warn", "deny"):
         raise ValueError(f"READ_ONCE_MODE must be 'warn' or 'deny', got {mode_raw!r}")
+    mode: Mode = mode_raw  # type: ignore[assignment]
 
     return Settings(
         bind_addr=bind,
+        host=host,
+        port=port,
         ttl_s=_int_env("READ_ONCE_TTL", _DEFAULT_TTL_S, min_value=1, max_value=86_400),
-        mode=mode_raw,
-        disabled=os.environ.get("READ_ONCE_DISABLED") == "1",
+        mode=mode,
+        disabled=_bool_env("READ_ONCE_DISABLED"),
         cache_maxsize=_int_env(
             "READ_ONCE_CACHE_MAXSIZE", _DEFAULT_CACHE_MAXSIZE,
             min_value=1, max_value=1_000_000,
