@@ -1,0 +1,82 @@
+# cdh-read-once
+
+Production CDHP handler that prevents redundant `Read` tool calls within a Claude Code session.
+
+Tracks `(session_id, file_path) → mtime_ns` per session. On re-read of an unchanged file within TTL: returns an `allow` envelope with an advisory reason (warn mode) or a `deny` envelope (deny mode). On first read or file change, abstains (`envelope: null`).
+
+The handler **never reads file contents**. It only calls `os.stat()` to read `mtime_ns` and `st_size` (for a token-count estimate in the reason text). Nothing about file content is sent over the wire.
+
+## Install / run
+
+```bash
+uv sync
+CDH_BIND_ADDR=127.0.0.1:9001 uv run cdh-read-once
+```
+
+Logs to stderr.
+
+## Configuration
+
+| Var | Default | Effect |
+|---|---|---|
+| `CDH_BIND_ADDR` | (required) | `host:port` to bind |
+| `READ_ONCE_MODE` | `warn` | `warn` → `allow` envelope with rationale; `deny` → `deny` envelope |
+| `READ_ONCE_TTL` | `1200` | seconds before a cache entry expires |
+| `READ_ONCE_DISABLED` | unset | set to `1` to no-op (always abstain) |
+| `READ_ONCE_CACHE_MAXSIZE` | `10000` | max `(session_id, file_path)` entries |
+| `READ_ONCE_MAX_CONCURRENCY` | `16` | bounded server thread pool |
+| `READ_ONCE_MAX_REQUEST_BYTES` | `1048576` | reject oversized requests with 413 |
+
+## Wire it to the cdh router
+
+`~/.config/cdh/config.toml`:
+
+```toml
+[[handler]]
+name = "read_once"
+url = "http://127.0.0.1:9001"
+events = ["preToolUse"]
+```
+
+Then `cdh start` (or restart). `cdh list-handlers` confirms it's alive.
+
+## systemd user unit
+
+`~/.config/systemd/user/cdh-read-once.service`:
+
+```ini
+[Unit]
+Description=cdh handler — read_once
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/code/cdh-read-once
+Environment=CDH_BIND_ADDR=127.0.0.1:9001
+ExecStart=%h/code/cdh-read-once/.venv/bin/cdh-read-once
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now cdh-read-once
+```
+
+## Tests
+
+```bash
+uv sync --extra dev
+uv run pytest
+```
+
+## Wire contract
+
+Implements [CDHP 1.0](../claude-dynamic-hooks/docs/CDHP.md):
+
+- `GET /health` → `{name, protocol_version, events, uptime_s}`
+- `POST /hooks/preToolUse` request `{"payload": "<json-string>"}` → `{"envelope": "<json-string>" | null}`
+- Other paths → 404. Bad request body → 400. Oversized → 413.
