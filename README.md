@@ -42,6 +42,17 @@ Then `cdh start` (or restart). `cdh list-handlers` confirms it's alive.
 
 ## systemd user unit
 
+### Pre-req: free the port
+
+If a manual `uv run cdh-read-once` is already on the configured port, stop it first — systemd won't be able to bind:
+
+```bash
+ss -tlnp | grep ':9001 '          # find any listener
+pkill -f 'cdh-read-once'          # or kill the specific PID
+```
+
+### Install
+
 `~/.config/systemd/user/cdh-read-once.service`:
 
 ```ini
@@ -57,17 +68,11 @@ ExecStart=%h/code/cdh-read-once/.venv/bin/cdh-read-once
 Restart=on-failure
 RestartSec=2
 
-# Hardening — handler only needs read-only stat() on user files.
+# User-mode-safe hardening. Stricter directives (PrivateDevices,
+# RestrictAddressFamilies, ProtectKernel*, LockPersonality) require
+# CAP_SYS_ADMIN and only work under system-mode systemd.
 NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
 PrivateTmp=yes
-PrivateDevices=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-LockPersonality=yes
 MemoryMax=128M
 TasksMax=64
 
@@ -79,6 +84,44 @@ WantedBy=default.target
 systemctl --user daemon-reload
 systemctl --user enable --now cdh-read-once
 ```
+
+### Verify
+
+```bash
+systemctl --user is-active cdh-read-once          # → active
+curl -s http://127.0.0.1:9001/health | jq .       # → name, version, cache_size
+```
+
+### Tail logs
+
+```bash
+journalctl --user -u cdh-read-once -f
+```
+
+### Uninstall
+
+```bash
+systemctl --user disable --now cdh-read-once
+rm ~/.config/systemd/user/cdh-read-once.service
+systemctl --user daemon-reload
+```
+
+### Stronger hardening (system-mode only)
+
+If you run the handler as a *system* unit (root-owned, in `/etc/systemd/system/`), you can add the directives that need `CAP_SYS_ADMIN`:
+
+```ini
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+```
+
+Under user-mode systemd these directives fail with `status=218/CAPABILITIES`.
 
 ## Tests
 
